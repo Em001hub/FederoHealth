@@ -18,6 +18,7 @@ import {
   generateSignedModelCard,
   selectOptimalAlgorithm,
 } from '../utils/autoTrainingEngine';
+import TransparencyReport from './TransparencyReport';
 import {
   uploadDataset, preprocessDataset, startTraining,
   pollTrainingStatus, getModelCardByJob, adaptQualityReport, adaptModelCard,
@@ -126,6 +127,7 @@ export default function DataUploadPanel({
   const [showCleaningDetails, setShowCleaningDetails] = useState(false);
   const [computeMode, setComputeMode] = useState('cloud');
   const [rowCount, setRowCount] = useState(0);
+  const [selectionAnalysis, setSelectionAnalysis] = useState(null);
 
   // Training state
   const [isTraining, setIsTraining] = useState(false);
@@ -176,6 +178,7 @@ export default function DataUploadPanel({
     setEpochProgress([]);
     setTrainingJobId(null);
     setTrainingPhase('');
+    setSelectionAnalysis(null);
 
     // Count rows for compute mode recommendation
     const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
@@ -192,6 +195,31 @@ export default function DataUploadPanel({
       });
       setQualityReport(report);
       updateHospitalQualityScore(currentHospital.id, report.scores.compositeQualityScore);
+
+      // Model-selection preview (client-side) so the user sees the decision rationale before training
+      const rec = report.cleanedRecordCount;
+      const pos = report.engineReadyRecords.filter(r => r.y === 1).length;
+      const cats = report.categoricalFeatureNames?.length || 0;
+      const profile = report.analysis?.preprocessing?.inputProfile || {};
+      const preview = selectOptimalAlgorithm({
+        recordCount: rec,
+        featureCount: report.numericFeatureNames.length + cats,
+        hasImages: report.imageInput,
+        classBalance: rec > 0 ? pos / rec : 0.5,
+        missingRatePct: profile.missingRatePct ?? 0,
+        categoricalFeatureCount: cats,
+      });
+      setSelectionAnalysis({
+        modelSelection: {
+          dataCharacteristics: preview.dataCharacteristics,
+          candidates: preview.candidates,
+          decisionFactors: preview.decisionFactors,
+          selectedAlgorithm: preview.selectedAlgorithm,
+          rationale: preview.rationale,
+          rejected: preview.rejected,
+        },
+        source: 'preview',
+      });
 
       await logAuditAction({
         action: 'DATASET_CLEANED_AND_INGESTED',
@@ -309,6 +337,11 @@ export default function DataUploadPanel({
       setSignedModelCard(card);
       setTrainingPhase('complete');
 
+      const backendSelection = card.analysis?.model_selection || card.analysis?.modelSelection;
+      if (backendSelection) {
+        setSelectionAnalysis({ modelSelection: backendSelection, source: 'cloud backend' });
+      }
+
       if (onModelTrainedAndRegistered) onModelTrainedAndRegistered(card);
 
       await logAuditAction({
@@ -372,9 +405,15 @@ export default function DataUploadPanel({
           setCurrentEpoch(ep);
           setEpochProgress([...history]);
         },
+        missingRatePct: qualityReport.analysis?.preprocessing?.inputProfile?.missingRatePct ?? 0,
+        categoricalFeatureCount: qualityReport.categoricalFeatureNames?.length || 0,
       });
 
       setTrainingResult(trainRes);
+
+      if (trainRes.analysis?.modelSelection) {
+        setSelectionAnalysis({ modelSelection: trainRes.analysis.modelSelection, source: 'edge engine' });
+      }
 
       const card = await generateSignedModelCard({
         trainResult: trainRes,
@@ -651,6 +690,13 @@ export default function DataUploadPanel({
               </div>
             )}
           </div>
+
+          {/* Data Prep & Model Selection Transparency (Edge + Cloud) */}
+          <TransparencyReport
+            preprocessing={qualityReport.analysis?.preprocessing}
+            modelSelection={selectionAnalysis?.modelSelection}
+            source={selectionAnalysis?.source}
+          />
 
           {/* Compute Mode Toggle + Train Button */}
           <div className="space-y-4">

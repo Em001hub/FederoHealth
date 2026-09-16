@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   ShieldCheck, Activity, Layers, HelpCircle, ArrowUpRight,
-  Bell, Key, Globe, Building2, User, ChevronDown, LogOut
+  Bell, Key, Globe, Building2, User, ChevronDown, LogOut, ShieldAlert
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import AuthModal from './AuthModal';
@@ -21,6 +21,7 @@ export default function Navbar() {
     { name: 'Overview', path: '/', icon: Activity },
     { name: 'Live Dashboard', path: '/dashboard', icon: Layers, badge: 'Live AI' },
     { name: 'Network Directory', path: '/network-directory', icon: Globe },
+    { name: 'Security Lab', path: '/security-lab', icon: ShieldAlert, badge: 'Live' },
     { name: 'How It Works', path: '/how-it-works', icon: HelpCircle },
   ];
 

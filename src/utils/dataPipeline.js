@@ -25,6 +25,16 @@ const BINARY_CANONICAL = {
   '0': 0, 'no': 0, 'false': 0, 'negative': 0, 'control': 0, 'neg': 0, 'n': 0, 'low': 0,
 };
 
+// Column-name hints that suggest image/path inputs
+const IMAGE_HINT_TOKENS = [
+  'image', 'img', 'scan', 'photo', 'path', 'url', 'fundus', 'dicom', 'dcm', 'camera', 'file',
+];
+
+// ── Transparency helpers ─────────────────────────────────────────────────────
+function logIssue(issues, type, severity, issue, resolution, count = 1) {
+  issues.push({ type, severity, issue, resolution, count });
+}
+
 // ── Ingestion & Type Detection ──────────────────────────────────────────────
 export function detectColumnTypes(headers, rows) {
   const types = {};
@@ -126,15 +136,45 @@ export function cleanAndValidateDataset(rawCsvText, useCase = 'sepsis', options 
   const rawHeaders = lines[0].split(/[,;\t]/).map(h => h.trim());
   const cleanHeaders = rawHeaders.map(h => h.toLowerCase().replace(/[^a-z0-9_]/g, '_'));
   
+  const issues = [];
   const rawRows = [];
+  let raggedRowCount = 0;
   for (let i = 1; i < lines.length; i++) {
     const cells = lines[i].split(/[,;\t]/).map(c => c.trim());
     if (cells.length === 1 && cells[0] === '') continue;
+    if (cells.length !== cleanHeaders.length) {
+      raggedRowCount++;
+      if (cells.length > cleanHeaders.length) {
+        cells.splice(cleanHeaders.length);
+      } else {
+        while (cells.length < cleanHeaders.length) cells.push('');
+      }
+    }
     rawRows.push(cells);
+  }
+  if (raggedRowCount > 0) {
+    logIssue(
+      issues, 'ragged_rows', 'medium',
+      `${raggedRowCount} row(s) with a different cell count than the ${cleanHeaders.length}-column header`,
+      'Rows padded/truncated to match header so columns stay aligned',
+      raggedRowCount,
+    );
   }
 
   const initialRecordCount = rawRows.length;
   const colTypes = detectColumnTypes(cleanHeaders, rawRows);
+
+  const imageInput = cleanHeaders.some(lc =>
+    IMAGE_HINT_TOKENS.some(tok => (lc || '').includes(tok))
+  );
+  if (imageInput) {
+    logIssue(
+      issues, 'image_input', 'medium',
+      'Columns hinting at image/path inputs detected',
+      'Routed to image-capable model selection (CNN / feature-extracted tabular fallback)',
+      1,
+    );
+  }
 
   // 2. Duplicate Detection & Removal
   const seenRowStrings = new Set();
@@ -149,6 +189,15 @@ export function cleanAndValidateDataset(rawCsvText, useCase = 'sepsis', options 
       seenRowStrings.add(rowKey);
       dedupedRows.push(row);
     }
+  }
+
+  if (duplicatesRemoved > 0) {
+    logIssue(
+      issues, 'duplicates', 'low',
+      `${duplicatesRemoved} exact duplicate row(s)`,
+      'Deduplicated — first occurrence kept',
+      duplicatesRemoved,
+    );
   }
 
   // 3. Column-by-Column Missingness & Cleaning Strategy
@@ -177,9 +226,23 @@ export function cleanAndValidateDataset(rawCsvText, useCase = 'sepsis', options 
 
     if (missingRate > maxMissingRateDrop) {
       droppedColumns.push(header);
+      logIssue(
+        issues, 'dropped_column', 'high',
+        `Column '${header}' is ${missingRate.toFixed(1)}% missing`,
+        'Column dropped from feature set (above missingness threshold)',
+        missingCount,
+      );
     } else {
       keptHeaders.push(header);
       keptColIndices.push(colIdx);
+      if (missingCount > 0) {
+        logIssue(
+          issues, 'missing_values', 'medium',
+          `${missingCount} of ${dedupedRows.length} values missing in '${header}' (${missingRate.toFixed(1)}%)`,
+          'Median/mode imputation applied',
+          missingCount,
+        );
+      }
     }
   });
 
@@ -205,7 +268,9 @@ export function cleanAndValidateDataset(rawCsvText, useCase = 'sepsis', options 
   // 5. Transform, Impute, Winsorize & Standardize Rows
   const cleanedRows = [];
   const outlierSummary = {};
-  keptHeaders.forEach(h => { outlierSummary[h] = { flagged: 0, capped: 0 }; });
+  const textCoercionCounts = {};
+  let zeroRowCount = 0;
+  keptHeaders.forEach(h => { outlierSummary[h] = { flagged: 0, capped: 0 }; textCoercionCounts[h] = 0; });
 
   for (const row of dedupedRows) {
     const cleanedRow = [];
@@ -221,10 +286,13 @@ export function cleanAndValidateDataset(rawCsvText, useCase = 'sepsis', options 
 
       if (type === 'numeric' || type === 'target' || type === 'categorical_binary') {
         let val;
+        const parsedVal = parseFloat(rawCell);
+        const isTextNumeric = !isMissing && (isNaN(parsedVal) || !isFinite(parsedVal));
         if (isMissing) {
           val = colStats[header]?.median ?? 0;
         } else {
-          val = parseFloat(rawCell);
+          if (isTextNumeric && type !== 'target') textCoercionCounts[header]++;
+          val = parsedVal;
           if (isNaN(val) || !isFinite(val)) {
             val = colStats[header]?.median ?? 0;
           }
@@ -289,8 +357,39 @@ export function cleanAndValidateDataset(rawCsvText, useCase = 'sepsis', options 
 
     if (!isRowAllZeros) {
       cleanedRows.push(cleanedRow);
+    } else {
+      zeroRowCount++;
     }
   }
+
+  if (zeroRowCount > 0) {
+    logIssue(
+      issues, 'zero_rows', 'medium',
+      `${zeroRowCount} row(s) are all-zero across numeric features`,
+      'Rows removed (no clinical signal)',
+      zeroRowCount,
+    );
+  }
+
+  // 5b. Emit post-transform transparency issues
+  keptHeaders.forEach(h => {
+    if (textCoercionCounts[h] > 0) {
+      logIssue(
+        issues, 'text_coercion', 'medium',
+        `${textCoercionCounts[h]} non-numeric text value(s) found in numeric column '${h}' (e.g. units, ranges, sentinels)`,
+        `Coerced to numeric (median ${colStats[h]?.median ?? 0})${colTypes[h] === 'numeric' ? ', outliers then winsorized' : ''}`,
+        textCoercionCounts[h],
+      );
+    }
+    if (outlierSummary[h].flagged > 0) {
+      logIssue(
+        issues, 'outliers', 'medium',
+        `${outlierSummary[h].flagged} outlier value(s) in '${h}' beyond Q1-1.5×IQR / Q3+1.5×IQR`,
+        `Winsorized (capped to bounds)`,
+        outlierSummary[h].flagged,
+      );
+    }
+  });
 
   // 6. FHIR Schema Mapping Check
   const aliases = COLUMN_ALIASES[useCase] || {};
@@ -356,15 +455,92 @@ export function cleanAndValidateDataset(rawCsvText, useCase = 'sepsis', options 
 
   // 9. Format records ready for FL training engine
   const targetIdx = keptHeaders.findIndex(h => colTypes[h] === 'target');
-  const numericIndices = keptHeaders
-    .map((h, i) => (colTypes[h] === 'numeric' && i !== targetIdx ? i : -1))
+  const featureIndices = keptHeaders
+    .map((h, i) => (['numeric', 'categorical_binary'].includes(colTypes[h]) && i !== targetIdx ? i : -1))
     .filter(i => i >= 0);
+  const numericFeatureNames = featureIndices.map(i => keptHeaders[i]);
+
+  // Constant (zero-variance) features
+  const constantFeatures = featureIndices
+    .filter(i => new Set(cleanedRows.map(r => r[i])).size <= 1)
+    .map(i => keptHeaders[i]);
+  if (constantFeatures.length > 0) {
+    logIssue(
+      issues, 'constant_features', 'high',
+      `${constantFeatures.length} feature(s) constant across all rows (${constantFeatures.join(', ')})`,
+      'Kept but weighted ~0; reported so users can drop them upstream',
+      constantFeatures.length,
+    );
+  }
+
+  // Categorical / text columns → label-encode for the edge engine
+  const catIndices = keptHeaders
+    .map((h, i) => (colTypes[h] === 'categorical' && i !== targetIdx ? i : -1))
+    .filter(i => i >= 0);
+  const categoricalFeatureNames = catIndices.map(i => keptHeaders[i]);
+
+  if (categoricalFeatureNames.length > 0) {
+    logIssue(
+      issues, 'categorical_encoding', 'low',
+      `${categoricalFeatureNames.length} categorical/text column(s) encoded as model features: ${categoricalFeatureNames.join(', ')}`,
+      'Label encoding applied before training',
+      categoricalFeatureNames.length,
+    );
+  }
+
+  const catEncoders = catIndices.map(i => {
+    const unique = [...new Set(cleanedRows.map(r => String(r[i])))];
+    const map = Object.fromEntries(unique.map((v, k) => [v, k]));
+    return { idx: i, map };
+  });
 
   const engineReadyRecords = cleanedRows.map(row => ({
-    f: numericIndices.map(idx => (typeof row[idx] === 'number' ? row[idx] : parseFloat(row[idx]) || 0)),
+    f: [
+      ...featureIndices.map(idx => (typeof row[idx] === 'number' ? row[idx] : parseFloat(row[idx]) || 0)),
+      ...catEncoders.map(({ idx, map }) => map[String(row[idx])] ?? 0),
+    ],
     y: targetIdx >= 0 ? (row[targetIdx] === 1 || row[targetIdx] === '1' ? 1 : 0) : 0,
     cleaned: true,
   }));
+
+  // Single-class target detection (surfaced for transparency; engines block with clear error)
+  if (targetIdx >= 0 && cleanedRows.length > 0) {
+    const uniqueTargets = new Set(cleanedRows.map(r => r[targetIdx]));
+    if (uniqueTargets.size < 2) {
+      logIssue(
+        issues, 'target_labels', 'critical',
+        `Target column '${keptHeaders[targetIdx]}' contains only one class — classification cannot learn a decision boundary`,
+        'Training is blocked with an actionable message; recheck label encoding/cohort selection',
+        1,
+      );
+    }
+  }
+
+  // Pre-imputation missingness across kept feature columns
+  const keptMissingCells = keptHeaders.reduce(
+    (s, h) => s + (colMissingSummary[h]?.missingCount || 0), 0
+  );
+  const totalFeatureCells = cleanedRows.length * (numericFeatureNames.length + categoricalFeatureNames.length) || 1;
+  const missingRatePct = Number(((keptMissingCells / totalFeatureCells) * 100).toFixed(1));
+  const posCount = engineReadyRecords.filter(r => r.y === 1).length;
+  const classBalancePct = Number(((posCount / (engineReadyRecords.length || 1)) * 100).toFixed(1));
+
+  const analysis = {
+    preprocessing: {
+      summary: `Ingested ${cleanedRows.length} clean records and resolved ${issues.length} data inconsistencies before training.`,
+      inputProfile: {
+        recordsUsed: cleanedRows.length,
+        recordsRemovedByCleaning: duplicatesRemoved + zeroRowCount,
+        featuresAfterEncoding: numericFeatureNames.length + categoricalFeatureNames.length,
+        numericFeatures: numericFeatureNames.length,
+        categoricalFeatures: categoricalFeatureNames.length,
+        missingRatePct,
+        classBalancePct,
+        imageInput,
+      },
+      resolvedIssues: issues,
+    },
+  };
 
   return {
     rawHeaderCount: rawHeaders.length,
@@ -387,7 +563,10 @@ export function cleanAndValidateDataset(rawCsvText, useCase = 'sepsis', options 
     cleanedRows,
     cleanedCsvText,
     engineReadyRecords,
-    numericFeatureNames: numericIndices.map(i => keptHeaders[i]),
+    numericFeatureNames,
+    categoricalFeatureNames,
+    analysis,
+    imageInput,
   };
 }
 

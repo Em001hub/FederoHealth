@@ -8,6 +8,7 @@ import DashboardPage from './pages/DashboardPage';
 import HowItWorksPage from './pages/HowItWorksPage';
 import AboutPage from './pages/AboutPage';
 import NetworkDirectoryPage from './pages/NetworkDirectoryPage';
+import SecurityLabPage from './pages/SecurityLabPage';
 import AuthPage from './pages/AuthPage';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import './App.css';
@@ -46,6 +47,7 @@ function AppContent() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/transparency" element={<DashboardPage />} />
             <Route path="/network-directory" element={<NetworkDirectoryPage />} />
+            <Route path="/security-lab" element={<SecurityLabPage />} />
             <Route path="/how-it-works" element={<HowItWorksPage />} />
             <Route path="/about" element={<AboutPage />} />
           </Routes>

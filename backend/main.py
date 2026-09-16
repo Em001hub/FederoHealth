@@ -29,6 +29,7 @@ from models import (
 from pipeline import clean_and_validate_dataset
 from trainer import build_model_card, train_model
 from federate import run_federated_round
+from security_api import router as security_router
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -190,11 +191,14 @@ async def start_training(job_id: str, body: TrainStartRequest):
 
     df = quality_report["df"]
     feature_names = quality_report["numeric_feature_names"]
+    categorical_feature_names = quality_report.get("categorical_feature_names", [])
     target_col = quality_report["target_col"]
     demographic_columns = quality_report.get("demographic_columns", [])
+    preprocessing_issues = quality_report.get("issues", [])
+    image_input = quality_report.get("image_input", False)
 
-    if not feature_names:
-        raise HTTPException(status_code=422, detail="No numeric feature columns found in dataset.")
+    if not feature_names and not categorical_feature_names:
+        raise HTTPException(status_code=422, detail="No usable feature columns (numeric or categorical) found in dataset.")
 
     hospital_info = {
         "id": body.hospital_id,
@@ -214,6 +218,9 @@ async def start_training(job_id: str, body: TrainStartRequest):
             compute_mode=body.compute_mode,
             on_progress=None,
             demographic_columns=demographic_columns,
+            categorical_feature_names=categorical_feature_names,
+            preprocessing_issues=preprocessing_issues,
+            image_input=image_input,
         )
 
         model_card = build_model_card(
@@ -247,6 +254,16 @@ async def start_training(job_id: str, body: TrainStartRequest):
             "history": train_result["training_history"],
             "model_card": model_card,
         }
+    except ValueError as e:
+        job_store.update_job(job_id, status="failed", training_status={
+            "status": "failed",
+            "current_epoch": 0,
+            "total_epochs": 20,
+            "history": [],
+            "model_id": None,
+            "error": str(e),
+        })
+        raise HTTPException(status_code=422, detail=f"Training failed: {str(e)}")
     except Exception as e:
         job_store.update_job(job_id, status="failed", training_status={
             "status": "failed",
@@ -343,3 +360,5 @@ async def health_check():
 # Include router under both root prefix and /api prefix for maximum compatibility
 app.include_router(router, prefix="")
 app.include_router(router, prefix="/api")
+# Security Laboratory endpoints (served only under /api, consumed by apiClient.js)
+app.include_router(security_router, prefix="/api")

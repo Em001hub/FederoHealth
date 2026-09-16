@@ -11,6 +11,7 @@ import {
 } from 'recharts';
 import { generateImpactSummary } from '../utils/impactSummary';
 import FederationImpactCard from './FederationImpactCard';
+import TransparencyReport from './TransparencyReport';
 
 export default function ModelCardModal({ modelCard, onClose, onShare }) {
   const [activeTab, setActiveTab] = useState('overview');
@@ -140,6 +141,7 @@ export default function ModelCardModal({ modelCard, onClose, onShare }) {
             { id: 'metrics',    label: 'Evaluation & Confusion Matrix',icon: Activity },
             { id: 'impact',     label: 'Federation Impact',            icon: TrendingUp },
             { id: 'saliency',   label: 'Clinical Saliency & Trust',    icon: Sparkles },
+            { id: 'transparency', label: 'Data & Selection Transparency', icon: FileText },
             { id: 'provenance', label: 'Provenance & Cryptography',    icon: Lock },
           ].map(t => {
             const Icon = t.icon;
@@ -471,7 +473,22 @@ export default function ModelCardModal({ modelCard, onClose, onShare }) {
             </div>
           )}
 
-          {/* ── TAB 5: PROVENANCE & CRYPTOGRAPHY ── */}
+          {/* ── TAB 5: DATA & SELECTION TRANSPARENCY ── */}
+          {activeTab === 'transparency' && (
+            <div className="space-y-4">
+              <p className="text-slate-300 leading-relaxed">
+                Full audit trail of what was found in the source data, how each inconsistency was
+                resolved, and the exact factors that decided this model over the alternatives.
+              </p>
+              <TransparencyReport
+                preprocessing={modelCard.analysis?.preprocessing}
+                modelSelection={modelCard.analysis?.model_selection || modelCard.analysis?.modelSelection}
+                source={modelCard.trainingMode === 'edge' ? 'edge engine' : 'cloud backend'}
+              />
+            </div>
+          )}
+
+          {/* ── TAB 6: PROVENANCE & CRYPTOGRAPHY ── */}
           {activeTab === 'provenance' && (
             <div className="space-y-6">
               <div className="p-5 rounded-2xl bg-slate-950/80 border border-cyan-400/30 space-y-4">

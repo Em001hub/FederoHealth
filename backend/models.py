@@ -155,6 +155,7 @@ class ModelCardResponse(BaseModel):
     signature_info: Dict[str, Any]
     federation_impact: Optional[FederationImpact] = None
     fairness_audit: Optional[FairnessAudit] = None
+    analysis: Optional[Dict[str, Any]] = None
 
 
 # ── Federate ─────────────────────────────────────────────────────────────────

@@ -18,33 +18,104 @@ export function selectOptimalAlgorithm({
   taskType = 'classification',
   hasImages = false,
   classBalance = 0.5,
+  missingRatePct = 0,
+  categoricalFeatureCount = 0,
 }) {
+  const extremeBalance = classBalance < 0.15 || classBalance > 0.85;
+  const dataCharacteristics = {
+    recordCount,
+    featureCount,
+    positivePrevalencePct: Math.round(classBalance * 1000) / 10,
+    missingRatePct,
+    categoricalFeatures: categoricalFeatureCount,
+    imageInput: hasImages,
+  };
+
   if (hasImages) {
+    const candidates = [
+      {
+        algorithm: 'Transfer Learning CNN (MobileNet-v2 Head)',
+        family: 'Deep Convolutional Neural Network',
+        suitability: 'high',
+        reason: 'Image-derived columns detected; a pre-trained CNN backbone captures spatial features from fundus/scan inputs far better than tabular models.',
+      },
+      {
+        algorithm: 'Deep Residual Tabular Perceptron (ResMLP)',
+        family: 'Deep Dense Feedforward Neural Network',
+        suitability: 'medium',
+        reason: 'Fallback when image pipeline is unavailable — learns non-linear rules on feature-extracted numeric columns.',
+      },
+    ];
     return {
-      algorithm: 'Transfer Learning CNN (MobileNet-v2 Head)',
-      family: 'Deep Convolutional Neural Network',
+      algorithm: candidates[0].algorithm,
+      family: candidates[0].family,
       reasoning: `Image input detected (${recordCount} image instances). Pre-trained MobileNet feature extractor with lightweight dense classification head provides superior spatial feature representation while preventing overfitting on limited clinical image partitions.`,
       architecture: 'Conv2D Feature Base + GlobalAveragePooling2D + Dense(64, relu) + Dropout(0.3) + Dense(1, sigmoid)',
       hyperparameters: { epochs: 15, batchSize: 16, learningRate: 0.001, optimizer: 'Adam' },
+      candidates,
+      rejected: [
+        { algorithm: 'Clinical Deep MLP Classifier', reason: 'Dense nets underfit spatial image features without convolutional priors.' },
+      ],
+      decisionFactors: [
+        { factor: 'Input modality', observed: 'image-derived columns present', weight: 'primary', tiltsToward: candidates[0].algorithm },
+        { factor: 'Instance count', observed: `${recordCount} images`, weight: 'secondary', tiltsToward: 'Fine-tuned transfer learning' },
+      ],
+      selectedAlgorithm: candidates[0].algorithm,
+      rationale: `Image-based batch (${recordCount} instances) → CNN route. Tabular fallback retained in case feature extraction is required.`,
+      dataCharacteristics,
     };
   }
 
+  // ── Tabular candidates ─────────────────────────────────────────────────────
+  const mlp = {
+    algorithm: 'Clinical Deep MLP Classifier (Tree-Regularized)',
+    family: 'Multi-Layer Neural Network with L2/Dropout Regularization',
+    suitability: recordCount >= 3000 ? 'medium' : 'high',
+    reason: 'Fast convergence, high interpretability, robust generalization on small-to-medium clinical tabular cohorts.',
+  };
+  const resmlp = {
+    algorithm: 'Deep Residual Tabular Perceptron (ResMLP)',
+    family: 'Deep Dense Feedforward Neural Network',
+    suitability: recordCount >= 3000 ? 'high' : 'medium',
+    reason: 'Large non-linear boundaries, built-in dimension expansion, tolerates class imbalance and noisy/encoded categorical features.',
+  };
+  const candidates = [mlp, resmlp];
+  const decisionFactors = [
+    { factor: 'Dataset size', observed: `${recordCount} records`, weight: 'primary', tiltsToward: recordCount < 3000 ? mlp.algorithm : resmlp.algorithm },
+    { factor: 'Feature count', observed: `${featureCount} engineered features`, weight: 'secondary', tiltsToward: featureCount > 30 ? resmlp.algorithm : mlp.algorithm },
+    { factor: 'Class balance', observed: `${(classBalance * 100).toFixed(0)}% positive prevalence`, weight: 'secondary', tiltsToward: extremeBalance ? resmlp.algorithm : mlp.algorithm },
+    { factor: 'Missingness / data quality', observed: `${missingRatePct}% missing before imputation`, weight: 'secondary', tiltsToward: missingRatePct > 20 ? resmlp.algorithm : mlp.algorithm },
+    { factor: 'Categorical / text columns', observed: `${categoricalFeatureCount} encoded column(s)`, weight: 'secondary', tiltsToward: categoricalFeatureCount >= 5 ? resmlp.algorithm : mlp.algorithm },
+  ];
+
+  let selected;
+  let rejected;
   if (recordCount < 3000) {
-    return {
-      algorithm: 'Clinical Deep MLP Classifier (Tree-Regularized)',
-      family: 'Multi-Layer Neural Network with L2/Dropout Regularization',
-      reasoning: `Dataset contains ${recordCount} records and ${featureCount} clinical biomarkers (classification task with ${(classBalance * 100).toFixed(0)}% positive prevalence). A multi-layer architecture with Dropout(0.25) and L2 kernel regularization provides fast convergence, high interpretability, and robust generalization on small-to-medium clinical tabular cohorts.`,
-      architecture: `Input(${featureCount}) → Dense(24, relu) → Dropout(0.2) → Dense(12, relu) → Dense(1, sigmoid)`,
-      hyperparameters: { epochs: 20, batchSize: 16, learningRate: 0.01, optimizer: 'Adam' },
-    };
+    selected = mlp;
+    rejected = [
+      { algorithm: resmlp.algorithm, reason: 'Higher variance on small cohorts; the 3-layer MLP is the edge-default < 3000 records.' },
+    ];
+  } else {
+    selected = resmlp;
+    rejected = [
+      { algorithm: mlp.algorithm, reason: 'Shallow MLP underfits large, non-linear clinical cohorts.' },
+    ];
   }
 
   return {
-    algorithm: 'Deep Residual Tabular Perceptron (ResMLP)',
-    family: 'Deep Dense Feedforward Neural Network',
-    reasoning: `Large-scale cohort detected (${recordCount.toLocaleString()} records, ${featureCount} features). A deep 3-stage feedforward network with Adam adaptive momentum and cosine decay learning rate schedule provides optimal non-linear boundary separation.`,
-    architecture: `Input(${featureCount}) → Dense(64, relu) → BatchNorm → Dense(32, relu) → Dropout(0.3) → Dense(16, relu) → Dense(1, sigmoid)`,
-    hyperparameters: { epochs: 25, batchSize: 32, learningRate: 0.005, optimizer: 'Adam' },
+    algorithm: selected.algorithm,
+    family: selected.family,
+    reasoning: `Dataset contains ${recordCount} records and ${featureCount} clinical biomarkers (classification task with ${(classBalance * 100).toFixed(0)}% positive prevalence, ${missingRatePct}% pre-imputation missingness). A multi-layer architecture with Dropout(0.25) and L2 kernel regularization provides fast convergence, high interpretability, and robust generalization on small-to-medium clinical tabular cohorts.`,
+    architecture: `Input(${featureCount}) → Dense(24, relu) → Dropout(0.2) → Dense(12, relu) → Dense(1, sigmoid)`,
+    hyperparameters: { epochs: 20, batchSize: 16, learningRate: 0.01, optimizer: 'Adam' },
+    candidates,
+    rejected,
+    decisionFactors,
+    selectedAlgorithm: selected.algorithm,
+    rationale: recordCount < 3000
+      ? `< 3000 records → shallow MLP: fastest to converge and easiest to audit in-browser for ${recordCount} records, ${featureCount} features, ${(classBalance * 100).toFixed(0)}% prevalence.`
+      : `≥ 3000 records → ResMLP: deep residual blocks best separate the non-linear boundaries in the ${recordCount}-record cohort over the shallow MLP.`,
+    dataCharacteristics,
   };
 }
 
@@ -56,6 +127,8 @@ export async function trainModelClientSide({
   hospitalInfo = {},
   onEpochProgress = null,
   dpConfig = { epsilon: 0.55, delta: 1e-5 },
+  missingRatePct = 0,
+  categoricalFeatureCount = 0,
 }) {
   const startTime = Date.now();
 
@@ -75,6 +148,8 @@ export async function trainModelClientSide({
     taskType: 'classification',
     hasImages: false,
     classBalance,
+    missingRatePct,
+    categoricalFeatureCount,
   });
 
   // 2. Feature Normalization (Z-score)
@@ -209,6 +284,16 @@ export async function trainModelClientSide({
     modelId: `mod-${useCase}-${Date.now().toString().slice(-6)}`,
     useCase,
     algorithmSelection: selection,
+    analysis: {
+      modelSelection: {
+        dataCharacteristics: selection.dataCharacteristics,
+        candidates: selection.candidates,
+        decisionFactors: selection.decisionFactors,
+        selectedAlgorithm: selection.selectedAlgorithm,
+        rationale: selection.rationale,
+        rejected: selection.rejected,
+      },
+    },
     metrics: {
       accuracy: parseFloat((accuracy * 100).toFixed(2)),
       precision: parseFloat(precision.toFixed(4)),
@@ -293,6 +378,7 @@ export async function generateSignedModelCard({
 
     // Cryptographic Commitment
     weightsHash: trainResult.weightsHash,
+    analysis: trainResult.analysis || null,
     signatureInfo: null,
   };
 

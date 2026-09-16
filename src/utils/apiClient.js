@@ -115,6 +115,86 @@ export async function federateModels(useCase) {
   return request('POST', `/federate/${useCase}`);
 }
 
+// ── Security Lab ─────────────────────────────────────────────────────────────
+/**
+ * Run poisoning defense benchmark.
+ * @param {object} cfg  { use_case, rounds, malicious_hospitals, attack_type, poison_ratio, attack_scale, dp_noise, seeds }
+ */
+export async function runPoisoningScenario(cfg = {}) {
+  return request('POST', '/security/poisoning', { body: cfg });
+}
+
+/**
+ * Run privacy membership-inference attack.
+ * @param {object} cfg  { use_case, epochs_list, dp_noise, seeds }
+ */
+export async function runPrivacyAttack(cfg = {}) {
+  return request('POST', '/security/privacy', { body: cfg });
+}
+
+/**
+ * Run FedAvg vs equity-FedAvg stress test.
+ * @param {object} cfg  { use_case, rounds, malicious_hospitals, attack_type, poison_ratio, attack_scale, seeds }
+ */
+export async function runStressTest(cfg = {}) {
+  return request('POST', '/security/stress', { body: cfg });
+}
+
+/**
+ * Run FedAvg vs compressed FedAvg study (sparsify + quantize).
+ * @param {object} cfg  { use_case, rounds, top_k_frac, n_bits, seeds }
+ */
+export async function runCompressionStudy(cfg = {}) {
+  return request('POST', '/security/compression', { body: cfg });
+}
+
+/**
+ * Run leave-one-hospital-out dataset shift analysis.
+ * @param {object} cfg  { use_case, seeds }
+ */
+export async function runDatasetShift(cfg = {}) {
+  return request('POST', '/security/dataset-shift', { body: cfg });
+}
+
+/**
+ * Fetch real per-hospital governance trust scores.
+ * @param {string} useCase
+ */
+export async function getGovernance(useCase = 'sepsis') {
+  return request('GET', `/security/governance?use_case=${encodeURIComponent(useCase)}`);
+}
+
+/**
+ * Run leave-one-hospital-out contribution valuation (Shapley-style marginal benefit).
+ * @param {object} cfg  { use_case, seeds }
+ */
+export async function runContributionValuation(cfg = {}) {
+  return request('POST', '/security/contribution', { body: cfg });
+}
+
+/**
+ * Run real secure aggregation (Bonawitz pairwise additive masking).
+ * @param {object} cfg  { use_case, rounds, agg, seeds }
+ */
+export async function runSecureAggregation(cfg = {}) {
+  return request('POST', '/security/secure-agg', { body: cfg });
+}
+
+/**
+ * Run local vs federated vs personalized (Ditto/FedPer).
+ * @param {object} cfg  { use_case, rounds, epochs }
+ */
+export async function runPersonalization(cfg = {}) {
+  return request('POST', '/security/personalization', { body: cfg });
+}
+
+/**
+ * Run async / straggler-tolerant aggregation (FedAsync-style).
+ * @param {object} cfg  { use_case, rounds, agg, seeds, straggler_penalty }
+ */
+export async function runAsyncStudy(cfg = {}) {
+  return request('POST', '/security/async', { body: cfg });
+}
 // ── Helpers ───────────────────────────────────────────────────────────────────
 /**
  * Convert a backend QualityReport to the shape DataUploadPanel already expects.
@@ -262,5 +342,6 @@ export function adaptModelCard(backendCard) {
         }
       : null,
     aggregationMethod: backendCard.aggregation_method,
+    analysis: backendCard.analysis || null,
   };
 }
